@@ -8,7 +8,6 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tw-elements/dist/css/index.min.css" />    
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src=""https://github.com/joewalnes/reconnecting-websocket/commit/f8055b77ba75e5d564ffb50d20a483bdd7edccdf"></script>
 <script>
   tailwind.config = {
     theme: {
@@ -36,28 +35,38 @@ function Email() {
 
     const loadDataOnlyOnce = () => {
         let socketUrl;
-        const response = fetch(window.location.pathname+'config').then(async (response) => await Promise.resolve(response.json()))
-        .then(async (data)=>{ 
+        const configUrl = new URL('config', window.location.href).href;
+        fetch(configUrl).then((response) => response.json())
+        .then((data)=>{ 
             socketUrl=data.wsProtocol+"://"+window.location.hostname+":"+data.wsPort+data.basePath; 
-            setSocketUrl(data.wsProtocol+"://"+window.location.hostname+":"+data.wsPort+data.basePath);
+            setSocketUrl(socketUrl);
             const ws = new WebSocket(socketUrl);
             ws.onopen = () => { 
                 console.log('Now connected to '+ socketUrl); 
                 setStatus(true);
-                if (lastMessageIdRef.current > 0) {
-                    ws.send(JSON.stringify({ since: lastMessageIdRef.current }));
-                }
+                ws.send(JSON.stringify({ since: lastMessageIdRef.current }));
             };
             ws.onmessage = (event) => {
-                const message = JSON.parse(event.data);
+                let message;
+                try {
+                    message = JSON.parse(event.data);
+                } catch (e) {
+                    console.log('Invalid WebSocket message', e);
+                    return;
+                }
                 if (message.id) {
-                    lastMessageIdRef.current = message.id;
+                    lastMessageIdRef.current = Math.max(lastMessageIdRef.current, message.id);
                 }
                 if (message.type !== 'MAIL' && message.type !== 'SMS') {
                     return;
                 }
                 console.log(message);
-                setMyMail(mails=>[message,...mails]);
+                setMyMail((mails) => {
+                    if (message.id && mails.some((m) => m.id === message.id)) {
+                        return mails;
+                    }
+                    return [message, ...mails];
+                });
             };
             ws.onclose = (event) => {
                 setStatus(false);

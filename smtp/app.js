@@ -27,6 +27,24 @@ const smtp_server = new SMTPServer({
     disabledCommands: ['AUTH', 'STARTTLS'],
 
     onData(stream, session, callback) {
+        let callbackDone = false;
+        const finish = (err) => {
+            if (callbackDone) {
+                return;
+            }
+            callbackDone = true;
+            callback(err || null);
+        };
+
+        stream.on('error', (err) => {
+            console.log('Error reading mail stream:', err.message || err);
+            finish(err);
+        });
+
+        stream.on('end', () => {
+            finish(null);
+        });
+
         simpleParser(stream, {
             skipHtmlToText: false,
             skipImageLinks: false,
@@ -35,14 +53,16 @@ const smtp_server = new SMTPServer({
             keepCidLinks: true,
         })
             .then((parsed) => {
-                const payload = toMailPayload(parsed);
-                console.log(payload);
-                storeAndBroadcast(payload);
-                callback(null);
+                try {
+                    const payload = toMailPayload(parsed);
+                    console.log(payload);
+                    storeAndBroadcast(payload);
+                } catch (err) {
+                    console.log('Error building mail payload:', err.message || err);
+                }
             })
             .catch((err) => {
                 console.log('Error parsing mail:', err.message || err);
-                callback(err);
             });
     },
 });
@@ -89,7 +109,7 @@ http_server.get('/sendsms', (req, res) => {
     }
 });
 
-http_server.listen(SERVER_PORT, () => {
+http_server.listen(SERVER_PORT, SERVER_HOST, () => {
     console.log(`\x1b[33m HTTP Server Running on http://${SERVER_HOST}:${SERVER_PORT}\x1b[0m`);
 });
 
@@ -144,12 +164,36 @@ setInterval(() => {
     });
 }, WS_HEARTBEAT_MS);
 
+function formatMailDate(value) {
+    if (!value) {
+        return new Date().toISOString();
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return new Date().toISOString();
+    }
+    return date.toISOString();
+}
+
+function addressText(field) {
+    if (!field) {
+        return '';
+    }
+    if (typeof field.text === 'string') {
+        return field.text;
+    }
+    if (Array.isArray(field)) {
+        return field.map((entry) => addressText(entry)).filter(Boolean).join(', ');
+    }
+    return '';
+}
+
 function toMailPayload(parsed) {
     return {
         type: 'MAIL',
-        date: parsed.date ? new Date(parsed.date).toISOString() : new Date().toISOString(),
-        from: { text: (parsed.from && parsed.from.text) || '' },
-        to: { text: (parsed.to && parsed.to.text) || '' },
+        date: formatMailDate(parsed.date),
+        from: { text: addressText(parsed.from) },
+        to: { text: addressText(parsed.to) },
         subject: parsed.subject || '',
         text: parsed.text || '',
         html: parsed.html || '',
@@ -205,19 +249,31 @@ function flushOutbound(client) {
     if (!next) {
         return;
     }
-    if (client.bufferedAmount > WS_SEND_BUFFER_MAX) {
+    const buffered = client.bufferedAmount || 0;
+    if (buffered > WS_SEND_BUFFER_MAX) {
         setTimeout(() => flushOutbound(client), 25);
         return;
     }
     client._flushing = true;
-    client.send(next, (err) => {
+    try {
+        client.send(next, (err) => {
+            client._flushing = false;
+            if (err) {
+                console.log('WebSocket send error:', err.message || err);
+            }
+            if (client._outbound && client._outbound[0] === next) {
+                client._outbound.shift();
+            }
+            flushOutbound(client);
+        });
+    } catch (err) {
         client._flushing = false;
-        if (err) {
-            console.log('WebSocket send error:', err.message || err);
+        console.log('WebSocket send error:', err.message || err);
+        if (client._outbound && client._outbound[0] === next) {
+            client._outbound.shift();
         }
-        client._outbound.shift();
         flushOutbound(client);
-    });
+    }
 }
 
 function replayToClient(client, sinceId) {
