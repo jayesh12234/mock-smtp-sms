@@ -36,8 +36,9 @@ const smtp_server = new SMTPServer({
             keepCidLinks: true,
         })
             .then((parsed) => {
-                const payload = toClientMessage(parsed);
-                console.log('[MAIL]', payload.subject, '->', payload.to.text);
+                const payload = toOtpListenerMessage(parsed);
+                const toLabel = payload.to && payload.to.text ? payload.to.text : '';
+                console.log('[MAIL]', payload.subject, '->', toLabel);
                 storeAndBroadcast(payload);
             })
             .catch((err) => {
@@ -105,11 +106,17 @@ http_server.get('/sendsms', (req, res) => {
     try {
         const message = {
             type: 'SMS',
-            date: new Date().toISOString(),
+            date: new Date(),
             to: { text: req.query.mobiles || '' },
             from: { text: req.query.sender || '' },
             subject: 'SMS: ' + (req.query.message || ''),
             text: req.query.message || '',
+            html: '',
+            messageId: '',
+            cc: undefined,
+            attachments: [],
+            headerLines: [],
+            headers: {},
         };
         console.log('[SMS]', message.text, '->', message.to.text);
         storeAndBroadcast(message);
@@ -161,47 +168,29 @@ setInterval(() => {
     });
 }, WS_HEARTBEAT_MS);
 
-function formatDate(value) {
-    if (!value) {
-        return new Date().toISOString();
-    }
-    const date = value instanceof Date ? value : new Date(value);
-    if (Number.isNaN(date.getTime())) {
-        return new Date().toISOString();
-    }
-    return date.toISOString();
-}
-
-function addressText(field) {
-    if (!field) {
-        return '';
-    }
-    if (typeof field.text === 'string') {
-        return field.text;
-    }
-    if (Array.isArray(field)) {
-        return field.map((entry) => addressText(entry)).filter(Boolean).join(', ');
-    }
-    return '';
-}
-
-function toClientMessage(parsed) {
+// Payload must match io.mosip.testrig.apirig.otp.Root (Jackson) — only these fields:
+// attachments, headerLines, headers, from, html, subject, text, date, cc, messageId, to, type
+function toOtpListenerMessage(parsed) {
     return {
         type: 'MAIL',
-        date: formatDate(parsed.date),
-        from: { text: addressText(parsed.from) },
-        to: { text: addressText(parsed.to) },
+        date: parsed.date || new Date(),
+        from: parsed.from,
+        to: parsed.to,
+        cc: parsed.cc,
         subject: parsed.subject || '',
         text: parsed.text || '',
-        html: typeof parsed.html === 'string' ? parsed.html : '',
-        textAsHtml: parsed.textAsHtml || '',
+        html: parsed.html || '',
         messageId: parsed.messageId || '',
-        attachments: (parsed.attachments || []).map((a) => ({
-            filename: a.filename,
-            contentType: a.contentType,
-            size: a.size,
-        })),
+        attachments: parsed.attachments || [],
+        headerLines: parsed.headerLines || [],
+        headers: parsed.headers || {},
     };
+}
+
+function toWebSocketPayload(message) {
+    const payload = Object.assign({}, message);
+    delete payload.id;
+    return payload;
 }
 
 function storeMessage(payload) {
@@ -219,7 +208,7 @@ function storeAndBroadcast(payload) {
 }
 
 function broadCast(message) {
-    const data = safeStringify(message);
+    const data = safeStringify(toWebSocketPayload(message));
     if (!data) {
         return;
     }
@@ -247,7 +236,7 @@ function replayToClient(client, sinceId) {
     messageStore
         .filter((m) => m.id > sinceId)
         .forEach((m) => {
-            const data = safeStringify(m);
+            const data = safeStringify(toWebSocketPayload(m));
             if (data && client.readyState === WebSocket.OPEN) {
                 try {
                     client.send(data);
