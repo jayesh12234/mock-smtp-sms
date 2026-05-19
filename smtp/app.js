@@ -14,12 +14,6 @@ const WS_EX_PROTOCOL = process.env.WS_EX_PROTOCOL || 'ws';
 const WS_EX_SERVER_PORT = process.env.WS_EX_SERVER_PORT || 8081;
 const WS_EX_BASE_PATH = process.env.WS_EX_BASE_PATH || '';
 const INDEX = path.join(__dirname, 'index.html');
-const MESSAGE_STORE_MAX = parseInt(process.env.MESSAGE_STORE_MAX || '500', 10);
-const WS_HEARTBEAT_MS = parseInt(process.env.WS_HEARTBEAT_MS || '60000', 10);
-const WS_SEND_BUFFER_MAX = parseInt(process.env.WS_SEND_BUFFER_MAX || '1048576', 10);
-
-let messageIdSeq = 0;
-const messageStore = [];
 
 const smtp_server = new SMTPServer({
     logger: false,
@@ -27,24 +21,6 @@ const smtp_server = new SMTPServer({
     disabledCommands: ['AUTH', 'STARTTLS'],
 
     onData(stream, session, callback) {
-        let callbackDone = false;
-        const finish = (err) => {
-            if (callbackDone) {
-                return;
-            }
-            callbackDone = true;
-            callback(err || null);
-        };
-
-        stream.on('error', (err) => {
-            console.log('Error reading mail stream:', err.message || err);
-            finish(err);
-        });
-
-        stream.on('end', () => {
-            finish(null);
-        });
-
         simpleParser(stream, {
             skipHtmlToText: false,
             skipImageLinks: false,
@@ -53,17 +29,17 @@ const smtp_server = new SMTPServer({
             keepCidLinks: true,
         })
             .then((parsed) => {
-                try {
-                    const payload = toMailPayload(parsed);
-                    console.log(payload);
-                    storeAndBroadcast(payload);
-                } catch (err) {
-                    console.log('Error building mail payload:', err.message || err);
-                }
+                parsed.type = 'MAIL';
+                console.log(parsed);
+                broadCast(parsed);
             })
             .catch((err) => {
                 console.log('Error parsing mail:', err.message || err);
             });
+
+        stream.on('end', () => {
+            callback(null);
+        });
     },
 });
 
@@ -93,14 +69,14 @@ http_server.get('/sendsms', (req, res) => {
     try {
         const message = {
             type: 'SMS',
-            date: new Date().toISOString(),
-            to: { text: req.query.mobiles || '' },
-            from: { text: req.query.sender || '' },
-            subject: 'SMS: ' + (req.query.message || ''),
-            text: req.query.message || '',
+            date: new Date().toJSON(),
+            to: { text: req.query.mobiles },
+            from: { text: req.query.sender },
+            subject: 'SMS: ' + req.query.message,
+            text: req.query.message,
         };
         console.log(message);
-        storeAndBroadcast(message);
+        broadCast(message);
         res.sendStatus(200);
     } catch (error) {
         console.log('Error: SMS Error occurred');
@@ -109,7 +85,7 @@ http_server.get('/sendsms', (req, res) => {
     }
 });
 
-http_server.listen(SERVER_PORT, SERVER_HOST, () => {
+http_server.listen(SERVER_PORT, () => {
     console.log(`\x1b[33m HTTP Server Running on http://${SERVER_HOST}:${SERVER_PORT}\x1b[0m`);
 });
 
@@ -137,161 +113,34 @@ socketServer.on('connection', (socketClient) => {
     socketClient.isAlive = true;
     socketClient.on('pong', heartbeat);
 
-    socketClient.on('message', (raw) => {
-        try {
-            const msg = JSON.parse(raw.toString());
-            if (msg && typeof msg.since === 'number') {
-                replayToClient(socketClient, msg.since);
+    const interval = setInterval(() => {
+        socketServer.clients.forEach((ws) => {
+            if (ws.isAlive === false) {
+                return ws.terminate();
             }
-        } catch (_) {
-            // ignore non-JSON client messages
-        }
-    });
+            ws.isAlive = false;
+            ws.ping();
+        });
+    }, 30000);
 
     socketClient.on('close', () => {
+        clearInterval(interval);
         console.log('closed');
         console.log('Number of clients: ', socketServer.clients.size);
     });
 });
 
-setInterval(() => {
-    socketServer.clients.forEach((ws) => {
-        if (ws.isAlive === false) {
-            return ws.terminate();
-        }
-        ws.isAlive = false;
-        ws.ping();
-    });
-}, WS_HEARTBEAT_MS);
-
-function formatMailDate(value) {
-    if (!value) {
-        return new Date().toISOString();
-    }
-    const date = value instanceof Date ? value : new Date(value);
-    if (Number.isNaN(date.getTime())) {
-        return new Date().toISOString();
-    }
-    return date.toISOString();
-}
-
-function addressText(field) {
-    if (!field) {
-        return '';
-    }
-    if (typeof field.text === 'string') {
-        return field.text;
-    }
-    if (Array.isArray(field)) {
-        return field.map((entry) => addressText(entry)).filter(Boolean).join(', ');
-    }
-    return '';
-}
-
-function toMailPayload(parsed) {
-    return {
-        type: 'MAIL',
-        date: formatMailDate(parsed.date),
-        from: { text: addressText(parsed.from) },
-        to: { text: addressText(parsed.to) },
-        subject: parsed.subject || '',
-        text: parsed.text || '',
-        html: parsed.html || '',
-        textAsHtml: parsed.textAsHtml || '',
-        messageId: parsed.messageId || '',
-        attachments: (parsed.attachments || []).map((a) => ({
-            filename: a.filename,
-            contentType: a.contentType,
-            size: a.size,
-        })),
-    };
-}
-
-function storeMessage(payload) {
-    const stored = Object.assign({}, payload, { id: ++messageIdSeq });
-    messageStore.push(stored);
-    while (messageStore.length > MESSAGE_STORE_MAX) {
-        messageStore.shift();
-    }
-    return stored;
-}
-
-function storeAndBroadcast(payload) {
-    const stored = storeMessage(payload);
-    broadCast(stored, true);
-}
-
-function safeStringify(message) {
+function broadCast(message) {
+    let data;
     try {
-        return JSON.stringify(message);
+        data = JSON.stringify(message);
     } catch (err) {
         console.log('Error serializing message:', err.message || err);
-        return null;
-    }
-}
-
-function sendToClient(client, data) {
-    if (client.readyState !== WebSocket.OPEN) {
         return;
     }
-    if (!client._outbound) {
-        client._outbound = [];
-    }
-    client._outbound.push(data);
-    flushOutbound(client);
-}
-
-function flushOutbound(client) {
-    if (client._flushing || client.readyState !== WebSocket.OPEN) {
-        return;
-    }
-    const next = client._outbound[0];
-    if (!next) {
-        return;
-    }
-    const buffered = client.bufferedAmount || 0;
-    if (buffered > WS_SEND_BUFFER_MAX) {
-        setTimeout(() => flushOutbound(client), 25);
-        return;
-    }
-    client._flushing = true;
-    try {
-        client.send(next, (err) => {
-            client._flushing = false;
-            if (err) {
-                console.log('WebSocket send error:', err.message || err);
-            }
-            if (client._outbound && client._outbound[0] === next) {
-                client._outbound.shift();
-            }
-            flushOutbound(client);
-        });
-    } catch (err) {
-        client._flushing = false;
-        console.log('WebSocket send error:', err.message || err);
-        if (client._outbound && client._outbound[0] === next) {
-            client._outbound.shift();
+    socketServer.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(data);
         }
-        flushOutbound(client);
-    }
-}
-
-function replayToClient(client, sinceId) {
-    messageStore
-        .filter((m) => m.id > sinceId)
-        .forEach((m) => {
-            const data = safeStringify(m);
-            if (data) {
-                sendToClient(client, data);
-            }
-        });
-}
-
-function broadCast(message, alreadyStored) {
-    const stored = alreadyStored ? message : storeMessage(message);
-    const data = safeStringify(stored);
-    if (!data) {
-        return;
-    }
-    socketServer.clients.forEach((client) => sendToClient(client, data));
+    });
 }

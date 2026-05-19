@@ -1,4 +1,4 @@
-<head>
+﻿<head>
     <meta charset="UTF-8" />
     <title>Welcome To The Mock Email/SMS World</title>
     <script src="https://unpkg.com/react@17/umd/react.development.js"></script>
@@ -25,48 +25,39 @@
     <script type="text/babel">
 
 
+function buildWebSocketUrl(data) {
+  const basePath = data.basePath || '';
+  if (window.location.protocol === 'https:' && data.wsProtocol === 'wss') {
+    return 'wss://' + window.location.host + basePath;
+  }
+  if (window.location.protocol === 'http:' && data.wsProtocol === 'ws') {
+    return 'ws://' + window.location.hostname + ':' + data.wsPort + basePath;
+  }
+  return data.wsProtocol + '://' + window.location.hostname + ':' + data.wsPort + basePath;
+}
+
 function Email() {
-  //const [count, setCount] = React.useState(0);
   const [mails, setMyMail] = React.useState([]);
-  const lastMessageIdRef = React.useRef(0);
-  const [wsSocket,setSocketUrl] = React.useState(); 
+  const [wsSocket,setSocketUrl] = React.useState('');
   const [status, setStatus] = React.useState(false);
-  
 
     const loadDataOnlyOnce = () => {
         let socketUrl;
         const configUrl = new URL('config', window.location.href).href;
         fetch(configUrl).then((response) => response.json())
         .then((data)=>{ 
-            socketUrl=data.wsProtocol+"://"+window.location.hostname+":"+data.wsPort+data.basePath; 
+            socketUrl = buildWebSocketUrl(data);
             setSocketUrl(socketUrl);
             const ws = new WebSocket(socketUrl);
             ws.onopen = () => { 
                 console.log('Now connected to '+ socketUrl); 
                 setStatus(true);
-                ws.send(JSON.stringify({ since: lastMessageIdRef.current }));
             };
             ws.onmessage = (event) => {
-                let message;
-                try {
-                    message = JSON.parse(event.data);
-                } catch (e) {
-                    console.log('Invalid WebSocket message', e);
-                    return;
-                }
-                if (message.id) {
-                    lastMessageIdRef.current = Math.max(lastMessageIdRef.current, message.id);
-                }
-                if (message.type !== 'MAIL' && message.type !== 'SMS') {
-                    return;
-                }
+                const message = JSON.parse(event.data);
                 console.log(message);
-                setMyMail((mails) => {
-                    if (message.id && mails.some((m) => m.id === message.id)) {
-                        return mails;
-                    }
-                    return [message, ...mails];
-                });
+                setMyMail(mails=>[message,...mails]   );
+                console.log("All done");
             };
             ws.onclose = (event) => {
                 setStatus(false);
@@ -99,6 +90,7 @@ function Email() {
   return (
     <div className="container mt-6 ml-6 justify-center">
         {"Connection Status: " + status}
+        {wsSocket ? <div className="text-sm text-slate-500 mb-2">WebSocket: {wsSocket}</div> : null}
       <div>
     <button type="button" onClick={() => window.location.reload(false)} className="inline-block px-6 pt-2.5 pb-2 bg-blue-600 text-white font-medium text-xs leading-normal uppercase rounded shadow-md hover:bg-blue-700 hover:shadow-lg focus:bg-blue-700 focus:shadow-lg focus:outline-none focus:ring-0 active:bg-blue-800 active:shadow-lg transition duration-150 ease-in-out flex align-center"> Reload
     </button>
