@@ -88,7 +88,8 @@ Following environment variables are supported on the server
 SMTP_SERVER_PORT = 8025
 SERVER_PORT = 8080
 WS_SERVER_PORT = 8081
-SERVER_HOST = localhost //set 0.0.0.0 when running in docker
+SERVER_HOST = 0.0.0.0 // default; binds SMTP, HTTP, and WebSocket on all interfaces
+MESSAGE_STORE_MAX = 500 // max MAIL/SMS kept for /messages and WebSocket replay
 ```
 
 In case you use a proxy and the websocket ports are not the default ones then use following environment variables to inform the client.
@@ -98,6 +99,27 @@ WS_EX_PROTOCOL = "ws" //set this to wss if running over https
 WS_EX_SERVER_PORT = 8081 // if the proxy server exposes the socker over https then set this to 443 and map the context path to the basepath
 WS_EX_BASE_PATH = "" //set your base path
 ```
+
+## DSL / CI smoke test
+
+After the service is running (local or in cluster port-forward):
+
+```bash
+cd smtp
+npm start &
+sleep 2
+npm run smoke-test
+```
+
+Or: `./smoke-test.sh 127.0.0.1 8080`
+
+The smoke test uses HTTP only (`/health`, `/sendsms`, `/messages`) so it does not depend on WebSocket.
+
+For automated assertions in DSL, prefer:
+
+- `GET /messages?since=0` — list received MAIL/SMS
+- `DELETE /messages` — clear store between scenarios
+- `GET /health` and `GET /ready` — probe endpoints
 
 ## Test
 

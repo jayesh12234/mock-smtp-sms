@@ -105,7 +105,12 @@ spec:
                   name: {{ . }}
               {{- end }}
               {{- end }}
-          ports: []
+          ports:
+            {{- range $serviceKey, $serviceValue := .Values.services }}
+            - name: {{ $serviceKey }}
+              containerPort: {{ $serviceValue.containerPort }}
+              protocol: {{ $serviceValue.protocol }}
+            {{- end }}
           {{- if .Values.resources }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
           {{- end }}

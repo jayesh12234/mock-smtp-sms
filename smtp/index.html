@@ -6,7 +6,7 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" />
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tw-elements/dist/css/index.min.css" />    
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tw-elements/dist/css/index.min.css" />
     <script src="https://cdn.tailwindcss.com"></script>
 <script>
   tailwind.config = {
@@ -24,113 +24,161 @@
     <div id="root"></div>
     <script type="text/babel">
 
-
-function buildWebSocketUrl(data) {
-  const basePath = data.basePath || '';
-  if (window.location.protocol === 'https:' && data.wsProtocol === 'wss') {
+function buildWebSocketUrl(config) {
+  const basePath = config.basePath || '';
+  if (window.location.protocol === 'https:' && config.wsProtocol === 'wss') {
     return 'wss://' + window.location.host + basePath;
   }
-  if (window.location.protocol === 'http:' && data.wsProtocol === 'ws') {
-    return 'ws://' + window.location.hostname + ':' + data.wsPort + basePath;
+  if (window.location.protocol === 'http:' && config.wsProtocol === 'ws') {
+    return 'ws://' + window.location.hostname + ':' + config.wsPort + basePath;
   }
-  return data.wsProtocol + '://' + window.location.hostname + ':' + data.wsPort + basePath;
+  return config.wsProtocol + '://' + window.location.hostname + ':' + config.wsPort + basePath;
+}
+
+function mergeMessages(prev, incoming) {
+  const byId = new Map();
+  prev.forEach((m) => { if (m.id) { byId.set(m.id, m); } });
+  incoming.forEach((m) => { if (m.id) { byId.set(m.id, m); } });
+  const merged = Array.from(byId.values());
+  merged.sort((a, b) => (b.id || 0) - (a.id || 0));
+  return merged;
 }
 
 function Email() {
   const [mails, setMyMail] = React.useState([]);
-  const [wsSocket,setSocketUrl] = React.useState('');
+  const [wsSocket, setSocketUrl] = React.useState('');
   const [status, setStatus] = React.useState(false);
+  const lastMessageIdRef = React.useRef(0);
+  const wsRef = React.useRef(null);
+  const reconnectTimerRef = React.useRef(null);
 
-    const loadDataOnlyOnce = () => {
-        let socketUrl;
-        const configUrl = new URL('config', window.location.href).href;
-        fetch(configUrl).then((response) => response.json())
-        .then((data)=>{ 
-            socketUrl = buildWebSocketUrl(data);
-            setSocketUrl(socketUrl);
-            const ws = new WebSocket(socketUrl);
-            ws.onopen = () => { 
-                console.log('Now connected to '+ socketUrl); 
-                setStatus(true);
-            };
-            ws.onmessage = (event) => {
-                const message = JSON.parse(event.data);
-                console.log(message);
-                setMyMail(mails=>[message,...mails]   );
-                console.log("All done");
-            };
-            ws.onclose = (event) => {
-                setStatus(false);
-            };
-            ws.onerror = (event) => {
-                setStatus(false);
-            }
-
+  const applyMessages = React.useCallback((incoming) => {
+    if (!incoming || !incoming.length) {
+      return;
+    }
+    incoming.forEach((m) => {
+      if (m.id) {
+        lastMessageIdRef.current = Math.max(lastMessageIdRef.current, m.id);
+      }
     });
+    setMyMail((prev) => mergeMessages(prev, incoming));
+  }, []);
 
-       // console.log(wsSocket);
-        /*const ws = new WebSocket(wsSocket);
-        ws.onopen = () => { 
-            console.log('Now connected'); 
-        };
-        ws.onmessage = (event) => {
-            const message = JSON.parse(event.data);
-            console.log(message);
-            setMyMail(mails=>[message,...mails]   );
-            console.log("All done");
-        };
-*/
-        console.log("loadDataOnlyOnce");
+  const pollMessages = React.useCallback(() => {
+    const url = new URL('messages', window.location.href);
+    url.searchParams.set('since', String(lastMessageIdRef.current));
+    fetch(url.href)
+      .then((r) => r.json())
+      .then((data) => applyMessages(data.messages || []))
+      .catch((err) => console.log('Poll /messages failed', err));
+  }, [applyMessages]);
+
+  const connectWebSocket = React.useCallback((url) => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    const ws = new WebSocket(url);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log('WebSocket connected:', url);
+      setStatus(true);
+      ws.send(JSON.stringify({ since: lastMessageIdRef.current }));
     };
 
-  // Similar to componentDidMount and componentDidUpdate:  
-  React.useEffect(() => {    // Update the document title using the browser API    
-    loadDataOnlyOnce();},[]);
-    
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === 'MAIL' || message.type === 'SMS') {
+          applyMessages([message]);
+        }
+      } catch (e) {
+        console.log('Invalid WebSocket message', e);
+      }
+    };
+
+    ws.onclose = () => {
+      setStatus(false);
+      reconnectTimerRef.current = setTimeout(() => connectWebSocket(url), 3000);
+    };
+
+    ws.onerror = () => {
+      setStatus(false);
+    };
+  }, [applyMessages]);
+
+  React.useEffect(() => {
+    const configUrl = new URL('config', window.location.href).href;
+    fetch(configUrl)
+      .then((r) => r.json())
+      .then((config) => {
+        const url = buildWebSocketUrl(config);
+        setSocketUrl(url);
+        pollMessages();
+        connectWebSocket(url);
+      })
+      .catch((err) => console.log('Failed to load config', err));
+
+    const pollInterval = setInterval(pollMessages, 5000);
+
+    return () => {
+      clearInterval(pollInterval);
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [connectWebSocket, pollMessages]);
+
   return (
     <div className="container mt-6 ml-6 justify-center">
-        {"Connection Status: " + status}
-        {wsSocket ? <div className="text-sm text-slate-500 mb-2">WebSocket: {wsSocket}</div> : null}
-      <div>
-    <button type="button" onClick={() => window.location.reload(false)} className="inline-block px-6 pt-2.5 pb-2 bg-blue-600 text-white font-medium text-xs leading-normal uppercase rounded shadow-md hover:bg-blue-700 hover:shadow-lg focus:bg-blue-700 focus:shadow-lg focus:outline-none focus:ring-0 active:bg-blue-800 active:shadow-lg transition duration-150 ease-in-out flex align-center"> Reload
-    </button>
-  </div>
-  
-<ol className="mt-6 border-l-2 border-blue-600">
-    {mails.map((mailItem, index)=> (
-        
-        <div key={index} className="border-b-2 ">
-        <li>
-
-    <div className="flex flex-start items-center">
-      <div className="bg-blue-600 w-4 h-4 flex items-center justify-center rounded-full -ml-2 mr-3 -mt-2"></div>  
-        <i className={mailItem.type==="MAIL"?"fa fa-envelope": "fa fa-commenting" }></i>
-      <div className="flex text-gray-600 font-semibold text-xl mt-1 text-ellipsis overflow-hidden whitespace-normal ml-2 mr-3 -mt-2 w-80">    {mailItem.to.text}</div>
-    <div className="flex text-gray-600 font-semibold text-xl mt-1 text-ellipsis overflow-hidden whitespace-normal ml-2 mr-3 -mt-2">{mailItem.subject}</div>
+      {'Connection Status: ' + (status ? 'connected' : 'disconnected')}
+      {wsSocket ? <div className="text-sm text-slate-500 mb-2">WebSocket: {wsSocket}</div> : null}
+      <div className="mb-4">
+        <button type="button" onClick={() => window.location.reload(false)} className="inline-block px-6 pt-2.5 pb-2 bg-blue-600 text-white font-medium text-xs leading-normal uppercase rounded shadow-md hover:bg-blue-700 hover:shadow-lg focus:bg-blue-700 focus:shadow-lg focus:outline-none focus:ring-0 active:bg-blue-800 active:shadow-lg transition duration-150 ease-in-out">
+          Reload
+        </button>
+        <button type="button" onClick={pollMessages} className="inline-block ml-2 px-6 pt-2.5 pb-2 bg-gray-600 text-white font-medium text-xs leading-normal uppercase rounded shadow-md">
+          Refresh
+        </button>
+      </div>
+      <ol className="mt-6 border-l-2 border-blue-600">
+        {mails.map((mailItem) => (
+          <div key={mailItem.id || mailItem.messageId || mailItem.date} className="border-b-2">
+            <li>
+              <div className="flex flex-start items-center">
+                <div className="bg-blue-600 w-4 h-4 flex items-center justify-center rounded-full -ml-2 mr-3 -mt-2"></div>
+                <i className={mailItem.type === 'MAIL' ? 'fa fa-envelope' : 'fa fa-commenting'}></i>
+                <div className="flex text-gray-600 font-semibold text-xl mt-1 ml-2 mr-3 -mt-2 w-80">
+                  {(mailItem.to && mailItem.to.text) || ''}
+                </div>
+                <div className="flex text-gray-600 font-semibold text-xl mt-1 ml-2 mr-3 -mt-2">
+                  {mailItem.subject || ''}
+                </div>
+              </div>
+              <div className="flex flex-start items-center">
+                <div className="w-4 h-4 -ml-2 mr-3 -mt-2"></div>
+                <div className="flex text-sm text-slate-500 ml-2 mr-3 mb-2 w-80">
+                  Date: {mailItem.date ? new Date(mailItem.date).toLocaleString() : ''}
+                </div>
+                <div className="flex text-sm text-slate-500 ml-2 mr-3 mb-2">
+                  From: {(mailItem.from && mailItem.from.text) || ''}
+                </div>
+              </div>
+              <div className="flex flex-start items-center">
+                <p className="text-gray-700 mb-2 mr-3 ml-4">{mailItem.html || mailItem.text}</p>
+              </div>
+            </li>
+          </div>
+        ))}
+      </ol>
     </div>
-    <div className="flex flex-start items-center">
-        <div className="w-4 h-4 flex items-center justify-center rounded-full -ml-2 mr-3 -mt-2"></div>
-        <div className="flex text-sm text-slate-500 ml-2 mr-3 mb-2 duration-300 transition ease-in-out w-80">
-      Date:  {new Date(mailItem.date).toLocaleString() } </div>
-      <div className="flex text-sm text-slate-500 truncate ml-2 mr-3 mb-2 duration-300 transition ease-in-out">From: {mailItem.from.text}</div>
-    </div>
-    <div className="flex flex-start items-center">
-      <p className="text-gray-700 mb-2 mr-3 ml-4">{mailItem.html || mailItem.text}</p>
-    </div>
-  </li>
-  </div>
-  ))}
-  </ol>
-</div>
   );
-  
 }
 
-
-ReactDOM.render(
-        <Email />,
-        document.getElementById('root')
-      );
+ReactDOM.render(<Email />, document.getElementById('root'));
     </script>
   </body>
 </html>

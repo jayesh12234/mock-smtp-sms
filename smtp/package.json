@@ -4,8 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node app.js"
+    "test": "sh smoke-test.sh",
+    "start": "node app.js",
+    "smoke-test": "sh smoke-test.sh"
   },
   "repository": {
     "type": "git",

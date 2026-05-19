@@ -97,6 +97,7 @@ image:
 startupProbe:
   enabled: true
   httpGet:
+    path: /health
     port: 8080
   initialDelaySeconds: 0
   periodSeconds: 30
@@ -107,6 +108,7 @@ startupProbe:
 livenessProbe:
   enabled: true
   httpGet:
+    path: /health
     port: 8080
   initialDelaySeconds: 20
   periodSeconds: 60
@@ -117,6 +119,7 @@ livenessProbe:
 readinessProbe:
   enabled: true
   httpGet:
+    path: /ready
     port: 8080
   initialDelaySeconds: 0
   periodSeconds: 60
