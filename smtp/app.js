@@ -2,168 +2,240 @@
 
 const { SMTPServer } = require('smtp-server');
 const simpleParser = require('mailparser').simpleParser;
-const WebSocket = require("ws");
-const express = require("express");
+const WebSocket = require('ws');
+const express = require('express');
 const path = require('path');
-const req = require('express/lib/request');
-const res = require('express/lib/response');
 
+const SMTP_SERVER_PORT = process.env.SMTP_SERVER_PORT || 8025;
+const SERVER_PORT = process.env.SERVER_PORT || 8080;
+const WS_SERVER_PORT = process.env.WS_SERVER_PORT || 8081;
+const SERVER_HOST = process.env.SERVER_HOST || 'localhost';
+const WS_EX_PROTOCOL = process.env.WS_EX_PROTOCOL || 'ws';
+const WS_EX_SERVER_PORT = process.env.WS_EX_SERVER_PORT || 8081;
+const WS_EX_BASE_PATH = process.env.WS_EX_BASE_PATH || '';
+const INDEX = path.join(__dirname, 'index.html');
+const MESSAGE_STORE_MAX = parseInt(process.env.MESSAGE_STORE_MAX || '500', 10);
+const WS_HEARTBEAT_MS = parseInt(process.env.WS_HEARTBEAT_MS || '60000', 10);
+const WS_SEND_BUFFER_MAX = parseInt(process.env.WS_SEND_BUFFER_MAX || '1048576', 10);
 
-
-const SMTP_SERVER_PORT = process.env.SMTP_SERVER_PORT  || 8025
-const SERVER_PORT = process.env.SERVER_PORT || 8080
-const WS_SERVER_PORT = process.env.WS_SERVER_PORT || 8081
-const SERVER_HOST = process.env.SERVER_HOST || "localhost"
-const WS_PROTOCOL = process.env.WS_PROTOCOL || "ws"
-const WS_EX_PROTOCOL = process.env.WS_EX_PROTOCOL || "ws"
-const WS_EX_SERVER_PORT = process.env.WS_EX_SERVER_PORT || 8081
-const WS_EX_BASE_PATH = process.env.WS_EX_BASE_PATH || ""
-const HTTP_PROTOCOL = process.env.HTTP_PROTOCOL || "http"
-const INDEX = path.join(__dirname, "index.html"); // index address
+let messageIdSeq = 0;
+const messageStore = [];
 
 const smtp_server = new SMTPServer({
     logger: false,
-
     banner: 'SMTP mock server, use UI to to check the actual message',
-
     disabledCommands: ['AUTH', 'STARTTLS'],
 
     onData(stream, session, callback) {
-        //stream.pipe(process.stdout);
-        simpleParser(stream, {skipHtmlToText: false, skipImageLinks: false, skipTextToHtml: false, skipTextLinks: false, keepCidLinks: true})
-            .then(parsed => {
-                parsed.type="MAIL";
-                console.log(parsed);
-                broadCast(parsed);
+        simpleParser(stream, {
+            skipHtmlToText: false,
+            skipImageLinks: false,
+            skipTextToHtml: false,
+            skipTextLinks: false,
+            keepCidLinks: true,
+        })
+            .then((parsed) => {
+                const payload = toMailPayload(parsed);
+                console.log(payload);
+                storeAndBroadcast(payload);
+                callback(null);
             })
-            .catch(err => {console.log("Error: Unknown Error in the Socket Server");});
-
-        stream.on("end",  () => {
-            console.log("OK we are done!")
-            callback(null)
-            
-        });
+            .catch((err) => {
+                console.log('Error parsing mail:', err.message || err);
+                callback(err);
+            });
     },
-})
-
-smtp_server.on('error', err => {
-    console.log('Error: SMTP Error occurred ')
-    console.log(err)
 });
 
-//Listen to the SMTP server
-smtp_server.listen(SMTP_SERVER_PORT, SERVER_HOST)
-console.log(`\x1b[33m SMTP Server Running on ${SERVER_HOST}:${SMTP_SERVER_PORT}\x1b[0m`)
+smtp_server.on('error', (err) => {
+    console.log('Error: SMTP Error occurred');
+    console.log(err);
+});
+
+smtp_server.listen(SMTP_SERVER_PORT, SERVER_HOST);
+console.log(`\x1b[33m SMTP Server Running on ${SERVER_HOST}:${SMTP_SERVER_PORT}\x1b[0m`);
 
 const http_server = express();
 
-
-//Set the route for index file
 http_server.get('/', (req, res) => {
     res.sendFile(INDEX);
-  });
-  
-//Set the route for configuration file
+});
+
 http_server.get('/config', (req, res) => {
     res.send({
         wsProtocol: WS_EX_PROTOCOL,
         wsPort: WS_EX_SERVER_PORT,
-        basePath: WS_EX_BASE_PATH
-     });
-  });
-
-//set the route for SMS
-http_server.get('/sendsms', (req, res, next) => {
-  try{
-    let message ={}
-    message.type = "SMS";
-    message.date = new Date().toJSON();
-    message.to = {"text": req.query.mobiles};
-    message.from = {"text": req.query.sender};
-    message.subject = "SMS: " + req.query.message;
-    message.text = req.query.message;
-    console.log(message);
-    broadCast(message);
-    res.sendStatus(200);
-  }
-  catch(error){
-    console.log('Error: SMS Error occurred ');
-    console.log(error);
-  };
+        basePath: WS_EX_BASE_PATH,
+    });
 });
 
-//Listen to the http port
-  http_server.listen(SERVER_PORT, () => {
+http_server.get('/sendsms', (req, res) => {
+    try {
+        const message = {
+            type: 'SMS',
+            date: new Date().toISOString(),
+            to: { text: req.query.mobiles || '' },
+            from: { text: req.query.sender || '' },
+            subject: 'SMS: ' + (req.query.message || ''),
+            text: req.query.message || '',
+        };
+        console.log(message);
+        storeAndBroadcast(message);
+        res.sendStatus(200);
+    } catch (error) {
+        console.log('Error: SMS Error occurred');
+        console.log(error);
+        res.sendStatus(500);
+    }
+});
+
+http_server.listen(SERVER_PORT, () => {
     console.log(`\x1b[33m HTTP Server Running on http://${SERVER_HOST}:${SERVER_PORT}\x1b[0m`);
-  })
+});
 
-  /**
-   * Listen on the Socker Server & Process messages
-   * */
-
-const socketServer = new WebSocket.Server({port: WS_SERVER_PORT,
+const socketServer = new WebSocket.Server({
+    port: WS_SERVER_PORT,
     perMessageDeflate: {
-      zlibDeflateOptions: {
-        // See zlib defaults.
-        chunkSize: 1024,
-        memLevel: 7,
-        level: 3
-      },
-      zlibInflateOptions: {
-        chunkSize: 10 * 1024
-      },
-      // Other options settable:
-      clientNoContextTakeover: true, // Defaults to negotiated value.
-      serverNoContextTakeover: true, // Defaults to negotiated value.
-      serverMaxWindowBits: 10, // Defaults to negotiated value.
-      // Below options specified as default values.
-      concurrencyLimit: 10, // Limits zlib concurrency for perf.
-      threshold: 1024 // Size (in bytes) below which messages
-      // should not be compressed if context takeover is disabled.
-    } });
+        zlibDeflateOptions: { chunkSize: 1024, memLevel: 7, level: 3 },
+        zlibInflateOptions: { chunkSize: 10 * 1024 },
+        clientNoContextTakeover: true,
+        serverNoContextTakeover: true,
+        serverMaxWindowBits: 10,
+        concurrencyLimit: 10,
+        threshold: 1024,
+    },
+});
 console.log(`\x1b[33m Socket Server Running on ws://${SERVER_HOST}:${WS_SERVER_PORT}\x1b[0m`);
 
 function heartbeat() {
     this.isAlive = true;
-  }
+}
 
 socketServer.on('connection', (socketClient) => {
     console.log('connected');
     console.log('Number of clients: ', socketServer.clients.size);
     socketClient.isAlive = true;
     socketClient.on('pong', heartbeat);
-    
-    socketClient.on('message', (message) => {
-      broadCast(message);
-     
+
+    socketClient.on('message', (raw) => {
+        try {
+            const msg = JSON.parse(raw.toString());
+            if (msg && typeof msg.since === 'number') {
+                replayToClient(socketClient, msg.since);
+            }
+        } catch (_) {
+            // ignore non-JSON client messages
+        }
     });
 
-    const interval = setInterval(function ping() {
-        socketServer.clients.forEach(function each(ws) {
-          if (ws.isAlive === false) return ws.terminate();
-      
-          ws.isAlive = false;
-          ws.ping();
-        });
-      }, 30000);
-
-    socketClient.on('close', (socketClient) => {
-        clearInterval(interval);
+    socketClient.on('close', () => {
         console.log('closed');
         console.log('Number of clients: ', socketServer.clients.size);
-      
     });
-  });
+});
 
-
-  /**
-   * Broadcasts the mail to all the connected sockets
-   * @param {*} message 
-   */
-  function broadCast(message){  
-    socketServer.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify(message));
+setInterval(() => {
+    socketServer.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            return ws.terminate();
         }
-      });
-  }
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, WS_HEARTBEAT_MS);
+
+function toMailPayload(parsed) {
+    return {
+        type: 'MAIL',
+        date: parsed.date ? new Date(parsed.date).toISOString() : new Date().toISOString(),
+        from: { text: (parsed.from && parsed.from.text) || '' },
+        to: { text: (parsed.to && parsed.to.text) || '' },
+        subject: parsed.subject || '',
+        text: parsed.text || '',
+        html: parsed.html || '',
+        textAsHtml: parsed.textAsHtml || '',
+        messageId: parsed.messageId || '',
+        attachments: (parsed.attachments || []).map((a) => ({
+            filename: a.filename,
+            contentType: a.contentType,
+            size: a.size,
+        })),
+    };
+}
+
+function storeMessage(payload) {
+    const stored = Object.assign({}, payload, { id: ++messageIdSeq });
+    messageStore.push(stored);
+    while (messageStore.length > MESSAGE_STORE_MAX) {
+        messageStore.shift();
+    }
+    return stored;
+}
+
+function storeAndBroadcast(payload) {
+    const stored = storeMessage(payload);
+    broadCast(stored, true);
+}
+
+function safeStringify(message) {
+    try {
+        return JSON.stringify(message);
+    } catch (err) {
+        console.log('Error serializing message:', err.message || err);
+        return null;
+    }
+}
+
+function sendToClient(client, data) {
+    if (client.readyState !== WebSocket.OPEN) {
+        return;
+    }
+    if (!client._outbound) {
+        client._outbound = [];
+    }
+    client._outbound.push(data);
+    flushOutbound(client);
+}
+
+function flushOutbound(client) {
+    if (client._flushing || client.readyState !== WebSocket.OPEN) {
+        return;
+    }
+    const next = client._outbound[0];
+    if (!next) {
+        return;
+    }
+    if (client.bufferedAmount > WS_SEND_BUFFER_MAX) {
+        setTimeout(() => flushOutbound(client), 25);
+        return;
+    }
+    client._flushing = true;
+    client.send(next, (err) => {
+        client._flushing = false;
+        if (err) {
+            console.log('WebSocket send error:', err.message || err);
+        }
+        client._outbound.shift();
+        flushOutbound(client);
+    });
+}
+
+function replayToClient(client, sinceId) {
+    messageStore
+        .filter((m) => m.id > sinceId)
+        .forEach((m) => {
+            const data = safeStringify(m);
+            if (data) {
+                sendToClient(client, data);
+            }
+        });
+}
+
+function broadCast(message, alreadyStored) {
+    const stored = alreadyStored ? message : storeMessage(message);
+    const data = safeStringify(stored);
+    if (!data) {
+        return;
+    }
+    socketServer.clients.forEach((client) => sendToClient(client, data));
+}

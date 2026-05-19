@@ -28,18 +28,8 @@
 
 function Email() {
   //const [count, setCount] = React.useState(0);
-  const [mails, setMyMail] = React.useState([
-    {   attachments: [],
-        date: "",
-        from : {text:""},
-        headerLines: [],
-        headers:{},
-        messageId:"",
-        subject:"",
-        text:"",
-        textAsHtml:"",
-        to:{}
-    }]);
+  const [mails, setMyMail] = React.useState([]);
+  const lastMessageIdRef = React.useRef(0);
   const [wsSocket,setSocketUrl] = React.useState(); 
   const [status, setStatus] = React.useState(false);
   
@@ -54,12 +44,20 @@ function Email() {
             ws.onopen = () => { 
                 console.log('Now connected to '+ socketUrl); 
                 setStatus(true);
+                if (lastMessageIdRef.current > 0) {
+                    ws.send(JSON.stringify({ since: lastMessageIdRef.current }));
+                }
             };
             ws.onmessage = (event) => {
                 const message = JSON.parse(event.data);
+                if (message.id) {
+                    lastMessageIdRef.current = message.id;
+                }
+                if (message.type !== 'MAIL' && message.type !== 'SMS') {
+                    return;
+                }
                 console.log(message);
-                setMyMail(mails=>[message,...mails]   );
-                console.log("All done");
+                setMyMail(mails=>[message,...mails]);
             };
             ws.onclose = (event) => {
                 setStatus(false);
