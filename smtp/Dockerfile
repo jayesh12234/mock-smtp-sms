@@ -12,9 +12,9 @@ WORKDIR /usr/src/app
 
 ENV SERVER_HOST=0.0.0.0
 
-COPY package*.json ./
+COPY package.json ./
 
-RUN npm ci --only=production
+RUN npm install --only=production && npm cache clean --force
 
 COPY app.js index.html ./
 
