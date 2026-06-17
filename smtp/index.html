@@ -26,13 +26,20 @@
 
 function buildWebSocketUrl(config) {
   const basePath = config.basePath || '';
-  if (window.location.protocol === 'https:' && config.wsProtocol === 'wss') {
-    return 'wss://' + window.location.host + basePath;
+  const protocol = window.location.protocol;
+  const hostname = window.location.hostname;
+  
+  // Determine WebSocket protocol based on current page protocol
+  const wsProtocol = protocol === 'https:' ? 'wss' : 'ws';
+  
+  // If basePath is provided, use it with the WebSocket protocol
+  if (basePath) {
+    return wsProtocol + '://' + hostname + basePath;
   }
-  if (window.location.protocol === 'http:' && config.wsProtocol === 'ws') {
-    return 'ws://' + window.location.hostname + ':' + config.wsPort + basePath;
-  }
-  return config.wsProtocol + '://' + window.location.hostname + ':' + config.wsPort + basePath;
+  
+  // Otherwise use the provided config port
+  const wsPort = config.wsPort || (protocol === 'https:' ? '443' : '80');
+  return wsProtocol + '://' + hostname + ':' + wsPort + basePath;
 }
 
 function mergeMessages(prev, incoming) {

@@ -1,4 +1,4 @@
-FROM node:16
+FROM node:20-alpine
 
 ARG SOURCE
 ARG COMMIT_HASH
@@ -12,11 +12,11 @@ WORKDIR /usr/src/app
 
 ENV SERVER_HOST=0.0.0.0
 
-COPY . ./
-
-RUN npm install
+COPY package*.json ./
 
 RUN npm ci --only=production
+
+COPY app.js index.html ./
 
 EXPOSE 8080
 EXPOSE 8081
